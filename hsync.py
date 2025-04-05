@@ -346,6 +346,8 @@ class Syncer:
     def __init__(self, storage_url):
         self.storage = build_storage_engine(storage_url)
 
+    def close(self):
+        self.storage.close()
 
     def do_backup(self, source, master_key, excludes):
 
