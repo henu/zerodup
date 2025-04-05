@@ -8,6 +8,7 @@ import json
 import os
 import re
 import stat
+import sys
 
 
 UNIX_USERNAME_RE_RAW = '([a-zA-Z0-9][a-zA-Z0-9._-]{0,30}[a-zA-Z0-9])'
@@ -20,35 +21,80 @@ STORAGE_LOCAL_URL_RE = re.compile(f'^[fF][iI][lL][eE]://?(?P<path>/.*)$')
 FILELIST_RE = re.compile(f'^(?P<identifier>.*)_(?P<timestamp>{TIMESTAMP_RE_RAW})$')
 
 
+class CorruptedData(Exception):
+    pass
+
+
+class FatalError(Exception):
+    def __init__(self, msg):
+        super().__init__(msg)
+
+
+def sha256_hash(b):
+    hasher = hashlib.sha256()
+    hasher.update(b)
+    return hasher.digest()
+
+
+def aes_cbc_encrypt(cleartext, key, iv):
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+    encryptor = cipher.encryptor()
+    padding = 16 - len(cleartext) % 16
+    cleartext_padded = cleartext + bytes([padding] * padding)
+    return encryptor.update(cleartext_padded) + encryptor.finalize()
+
+
+def aes_cbc_decrypt(ciphertext, key, iv):
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+    decryptor = cipher.decryptor()
+    try:
+        cleartext_padded = decryptor.update(ciphertext) + decryptor.finalize()
+    except ValueError as err:
+        raise CorruptedData() from err
+    padding = cleartext_padded[-1]
+    return cleartext_padded[:-padding]
+
+
 class FileList:
 
-    def __init__(self, contents=None):
+    def __init__(self, contents=None, encryption_key=None):
         self.items = {}
 
+        if contents and encryption_key:
+            iv = contents[0:16]
+            try:
+                contents = aes_cbc_decrypt(contents[16:], encryption_key, iv)
+            except CorruptedData:
+                # Maybe older file lists did not have encryption. Ignore for now.
+                pass
+
         if contents:
-            for line in contents.split(b'\n'):
-                # Read single line JSON, or skip if the line is empty
-                if not line:
-                    continue
-                data = json.loads(line)
-
-                # Ignore invalid items
-                if 'path' not in data:
-                    continue
-                if data['type'] == 'link':
-                    if 'target' not in data:
+            try:
+                for line in contents.split(b'\n'):
+                    # Read single line JSON, or skip if the line is empty
+                    if not line:
                         continue
-                elif data['type'] == 'file':
-                    pass
-                elif data['type'] == 'dir':
-                    pass
-                else:
-                    continue
+                    data = json.loads(line)
 
-                # Add item
-                path = data['path']
-                del data['path']
-                self.items[path] = data
+                    # Ignore invalid items
+                    if 'path' not in data:
+                        continue
+                    if data['type'] == 'link':
+                        if 'target' not in data:
+                            continue
+                    elif data['type'] == 'file':
+                        pass
+                    elif data['type'] == 'dir':
+                        pass
+                    else:
+                        continue
+
+                    # Add item
+                    path = data['path']
+                    del data['path']
+                    self.items[path] = data
+            except UnicodeDecodeError as err:
+                raise CorruptedData from err
 
     def get_item(self, path):
         return self.items.get(path)
@@ -75,12 +121,17 @@ class FileList:
             'target': target,
         }
 
-    def to_bytes(self):
+    def to_bytes(self, encryption_key):
         result = b''
         for path, data in sorted(self.items.items()):
             data = data.copy()
             data['path'] = path
             result += json.dumps(data).encode('ascii') + b'\n'
+
+        if encryption_key:
+            iv = os.urandom(16)
+            result = iv + aes_cbc_encrypt(result, encryption_key, iv)
+
         return result
 
 
@@ -165,6 +216,10 @@ class Arguments:
             help='Excludes a path. Can be absolute or part of path. Can contain * for wildcards.',
             dest='excludes',
         )
+        # Encryption arguments
+        encrypt_group = parser.add_mutually_exclusive_group(required=False)
+        encrypt_group.add_argument('--no-encryption', action='store_true', help='Do not encrypt file list.')
+        encrypt_group.add_argument('-kf', '--key-file', metavar='key-file', help='File that contains encryption key.')
 
         # Parse
         args = parser.parse_args()
@@ -179,6 +234,8 @@ class Arguments:
             if raw_exclude.startswith('/'):
                 regex = f'^{regex}'
             self.excludes.append(re.compile(regex))
+        self.key_file = args.key_file
+        self.encryption = not args.no_encryption
 
 
 class Syncer:
@@ -186,26 +243,35 @@ class Syncer:
     def __init__(self, args):
         self.args = args
 
+        # Read possible encryption key
+        # TODO: If encryption key is not given, and no encryption is not requested either, ask it with input from user!
+        self.master_key = None
+        if self.args.key_file:
+            with open(os.path.expanduser(self.args.key_file), 'r') as f:
+                master_key_raw = f.read().strip().encode('utf8')
+            self.master_key = sha256_hash(master_key_raw)
+
         self.storage = build_storage_engine(self.args.destination)
 
-    def run(self):
-        # TODO: Encrypt filelist!
 
-        # Find the most recent filelist and download it.
-        root_files = self.storage.listdir('/')
+    def run(self):
+
+        # Find the most recent filelist and download it. Go files in reversed order, hoping to find
+        # the most recent filelist first. This prevents useless opening of multiple filelists.
         latest_filelist = None
         latest_filelist_timestamp = None
-        for file in root_files:
+        for file in sorted(self.storage.listdir('/'), reverse=True):
             # Check if this is a filelist
             filelist_match = FILELIST_RE.match(file)
             if filelist_match:
                 if filelist_match.groupdict()['identifier'] == self.storage.get_identifier():
                     timestamp = datetime.datetime.fromisoformat(filelist_match.groupdict()['timestamp'])
                     if latest_filelist_timestamp is None or latest_filelist_timestamp < timestamp:
-                        latest_filelist_timestamp = timestamp
-                        latest_filelist = file
-        if latest_filelist:
-            latest_filelist = FileList(self.storage.read(latest_filelist))
+                        try:
+                            latest_filelist = FileList(self.storage.read(file), self.master_key)
+                            latest_filelist_timestamp = timestamp
+                        except CorruptedData as err:
+                            raise FatalError(f'Unable to open file list "{file}"! Is it encrypted with a different key?') from err
 
         source_abs = os.path.abspath(os.path.expanduser(self.args.source))
         new_filelist = FileList()
@@ -216,7 +282,7 @@ class Syncer:
             self.storage.get_identifier(),
             datetime.datetime.now(datetime.timezone.utc).isoformat(),
         )
-        self.storage.write(new_filelist_name, new_filelist.to_bytes())
+        self.storage.write(new_filelist_name, new_filelist.to_bytes(self.master_key))
 
     def _scan_recursively(self, path_abs, path_rel, new_filelist, old_filelist):
 
@@ -265,22 +331,14 @@ class Syncer:
                     child_bytes = f.read()
 
                 # Normal hash
-                hash_hasher = hashlib.sha256()
-                hash_hasher.update(child_bytes)
-                child_hash = hash_hasher.digest()
+                child_hash = sha256_hash(child_bytes)
 
                 # Encrypt data
                 iv = child_hash[:16]
-                cipher = Cipher(algorithms.AES(child_hash), modes.CBC(iv), backend=default_backend())
-                encryptor = cipher.encryptor()
-                padding = 16 - len(child_bytes) % 16
-                child_bytes_padded = child_bytes + bytes([padding] * padding)
-                child_bytes_encrypted = encryptor.update(child_bytes_padded) + encryptor.finalize()
+                child_bytes_encrypted = aes_cbc_encrypt(child_bytes, child_hash, iv)
 
                 # Get encrypted hash
-                crypthash_hasher = hashlib.sha256()
-                crypthash_hasher.update(child_bytes_encrypted)
-                child_crypthash_hex = crypthash_hasher.hexdigest().lower()
+                child_crypthash_hex = sha256_hash(child_bytes_encrypted).hex().lower()
 
                 # Write encrypted file to storage, unless it already exists there
                 child_storagepath = 'storage/{}/{}/{}/{}/{}'.format(
@@ -311,8 +369,14 @@ class Syncer:
 
 if __name__ == '__main__':
 
-    args = Arguments()
+    try:
 
-    syncer = Syncer(args)
+        args = Arguments()
 
-    syncer.run()
+        syncer = Syncer(args)
+
+        syncer.run()
+
+    except FatalError as err:
+        print(f'ERROR: {err}')
+        sys.exit(1)
