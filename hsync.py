@@ -309,18 +309,21 @@ class Arguments:
         # Parse
         args = parser.parse_args()
 
-        # Store arguments
+        # Validate action
+        if args.action not in ['backup', 'restore']:
+            raise FatalError('No action given!')
         self.action = args.action
-        self.source = args.source
-        self.destination = args.destination
+
+        # Store arguments
+        self.source = getattr(args, 'source', None)
+        self.destination = getattr(args, 'destination', None)
         self.excludes = []
-        if hasattr(args, 'excludes'):
-            for raw_exclude in args.excludes or []:
-                regex = re.escape(raw_exclude)
-                regex = regex.replace('\\*', '.*')
-                if raw_exclude.startswith('/'):
-                    regex = f'^{regex}'
-                self.excludes.append(re.compile(regex))
+        for raw_exclude in getattr(args, 'excludes', None) or []:
+            regex = re.escape(raw_exclude)
+            regex = regex.replace('\\*', '.*')
+            if raw_exclude.startswith('/'):
+                regex = f'^{regex}'
+            self.excludes.append(re.compile(regex))
 
         # Read possible encryption key
         self.master_key = None
