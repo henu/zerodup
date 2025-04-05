@@ -10,6 +10,7 @@ import os
 import re
 import stat
 import sys
+import time
 
 
 UNIX_USERNAME_RE_RAW = '([a-zA-Z0-9][a-zA-Z0-9._-]{0,30}[a-zA-Z0-9])'
@@ -100,9 +101,18 @@ class FileList:
     def get_item(self, path):
         return self.items.get(path)
 
-    def add_dir(self, path, perms):
+    def get_items(self):
+        items_arr = []
+        for path, data in self.items.items():
+            data = data.copy()
+            data['path'] = path
+            items_arr.append(data)
+        return items_arr
+
+    def add_dir(self, path, mtime, perms):
         self.items[path] = {
             'type': 'dir',
+            'mtime': mtime,
             'perms': perms,
         }
 
@@ -206,52 +216,58 @@ class Arguments:
             prog='HSync',
             description='Backup app, focused on deduplicating data.',
         )
+
+        # TODO: Add argument for verbosity!
+
+        # Encryption arguments
+        encrypt_group = parser.add_mutually_exclusive_group(required=False)
+        encrypt_group.add_argument('--no-encryption', action='store_true', help='Do not encrypt file list.')
+        encrypt_group.add_argument('-kf', '--key-file', metavar='key-file', help='File that contains encryption key.')
+
+        action_subparsers = parser.add_subparsers(dest='action', help='Actions')
+
+        # Backup subcommand
+        action_backup_parser = action_subparsers.add_parser('backup', help='Perform backup')
         # Source and destinations
-        parser.add_argument('source')
-        parser.add_argument('destination')
-        # Exclude option
-        parser.add_argument(
+        action_backup_parser.add_argument('source', help='Source directory to backup')
+        action_backup_parser.add_argument('destination', help='Destination URL for backup')
+        action_backup_parser.add_argument(
             '-e', '--exclude',
             action='append',
             type=str,
             help='Excludes a path. Can be absolute or part of path. Can contain * for wildcards.',
             dest='excludes',
         )
-        # Encryption arguments
-        encrypt_group = parser.add_mutually_exclusive_group(required=False)
-        encrypt_group.add_argument('--no-encryption', action='store_true', help='Do not encrypt file list.')
-        encrypt_group.add_argument('-kf', '--key-file', metavar='key-file', help='File that contains encryption key.')
+
+        # Restore subcommand
+        action_restore_parser = action_subparsers.add_parser('restore', help='Restore from backup')
+        action_restore_parser.add_argument('source', help='Source backup URL')
+        action_restore_parser.add_argument('destination', help='Destination directory for restore')
 
         # Parse
         args = parser.parse_args()
 
         # Store arguments
+        self.action = args.action
         self.source = args.source
         self.destination = args.destination
         self.excludes = []
-        for raw_exclude in args.excludes or []:
-            regex = re.escape(raw_exclude)
-            regex = regex.replace('\\*', '.*')
-            if raw_exclude.startswith('/'):
-                regex = f'^{regex}'
-            self.excludes.append(re.compile(regex))
-        self.key_file = args.key_file
-        self.encryption = not args.no_encryption
-
-
-class Syncer:
-
-    def __init__(self, args):
-        self.args = args
+        if hasattr(args, 'excludes'):
+            for raw_exclude in args.excludes or []:
+                regex = re.escape(raw_exclude)
+                regex = regex.replace('\\*', '.*')
+                if raw_exclude.startswith('/'):
+                    regex = f'^{regex}'
+                self.excludes.append(re.compile(regex))
 
         # Read possible encryption key
         self.master_key = None
-        if self.args.key_file:
-            with open(os.path.expanduser(self.args.key_file), 'r') as f:
+        if args.key_file:
+            with open(os.path.expanduser(args.key_file), 'r') as f:
                 master_key_raw = f.read().strip().encode('utf8')
             self.master_key = sha256_hash(master_key_raw)
         # If no key is given, and the encryption is still needed, ask key
-        elif self.args.encryption:
+        elif not args.no_encryption:
             master_key_raw = getpass.getpass('Please enter encryption key: ')
             master_key_raw_confirm = getpass.getpass('Confirm encryption key: ')
             if master_key_raw != master_key_raw_confirm:
@@ -259,13 +275,100 @@ class Syncer:
             master_key_raw = master_key_raw.strip().encode('utf8')
             self.master_key = sha256_hash(master_key_raw)
 
-        self.storage = build_storage_engine(self.args.destination)
+
+class Syncer:
+
+    def __init__(self, storage_url):
+        self.storage = build_storage_engine(storage_url)
 
 
-    def run(self):
+    def do_backup(self, source, master_key, excludes):
 
-        # Find the most recent filelist and download it. Go files in reversed order, hoping to find
-        # the most recent filelist first. This prevents useless opening of multiple filelists.
+        latest_filelist = self._find_latest_filelist(master_key)
+
+        source_abs = os.path.abspath(os.path.expanduser(source))
+        new_filelist = FileList()
+        self._scan_recursively(source_abs, '', new_filelist, latest_filelist, excludes)
+
+        # Write filelist to storage
+        new_filelist_name = '{}_{}'.format(
+            self.storage.get_identifier(),
+            datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        )
+        self.storage.write(new_filelist_name, new_filelist.to_bytes(master_key))
+
+    def do_restore(self, destination, master_key):
+
+        # Get latest filelist. This is required for successful restore
+        latest_filelist = self._find_latest_filelist(master_key)
+        if not latest_filelist:
+            raise FatalError('No backup found!')
+
+        # Make sure the destination exists and is empty
+        destination_abs = os.path.abspath(os.path.expanduser(destination))
+        if os.path.lexists(destination_abs):
+            if not os.path.isdir(destination_abs):
+                raise FatalError('Destination must be a directory!')
+            if os.listdir(destination_abs):
+                raise FatalError('Destination must be an empty directory!')
+        else:
+            os.makedirs(destination_abs)
+
+        # Start restore
+        for item in latest_filelist.get_items():
+            print(item['path'])
+
+            # Get absolute path, and make sure parent directory exists
+            item_path_abs = os.path.join(destination_abs, item['path'])
+            parent = os.path.dirname(item_path_abs)
+            if not os.path.lexists(parent):
+                os.makedirs(parent)
+
+            # Create directory
+            if item['type'] == 'dir':
+                if not os.path.lexists(item_path_abs):
+                    if 'perms' in item:
+                        os.makedirs(item_path_abs, mode=item['perms'])
+                    else:
+                        os.makedirs(item_path_abs)
+                elif 'perms' in item:
+                    os.chmod(item_path_abs, item['perms'])
+
+            # Create file
+            elif item['type'] == 'file':
+                # Decrypt file
+                item_encrypted_path = self._get_storage_path(item['crypthash'])
+                item_encrypted_bytes = self.storage.read(item_encrypted_path)
+                item_hash = bytes.fromhex(item['hash'])
+                item_bytes = aes_cbc_decrypt(item_encrypted_bytes, item_hash, item_hash[:16])
+                with open(item_path_abs, 'wb') as f:
+                    f.write(item_bytes)
+                if 'perms' in item:
+                    os.chmod(item_path_abs, item['perms'])
+
+            # Create symlink
+            elif item['type'] == 'link':
+                os.symlink(item['target'], item_path_abs)
+
+            else:
+                raise FatalError('Invalid type: ' + item['type'])
+
+            # Set modification (and access) time. Unfortunately this does not work with symlinks
+            if 'mtime' in item and item['type'] != 'link':
+                os.utime(item_path_abs, (time.time(), item['mtime']))
+
+    def _get_storage_path(self, crypthash_hex):
+        return 'storage/{}/{}/{}/{}/{}'.format(
+            crypthash_hex[0:2],
+            crypthash_hex[2:4],
+            crypthash_hex[4:6],
+            crypthash_hex[6:8],
+            crypthash_hex,
+        )
+
+    def _find_latest_filelist(self, master_key):
+        # Find the most recent filelist and download it. Go files in
+        # reversed order, hoping to find the most recent filelist first.
         latest_filelist = None
         latest_filelist_timestamp = None
         for file in sorted(self.storage.listdir('/'), reverse=True):
@@ -276,23 +379,13 @@ class Syncer:
                     timestamp = datetime.datetime.fromisoformat(filelist_match.groupdict()['timestamp'])
                     if latest_filelist_timestamp is None or latest_filelist_timestamp < timestamp:
                         try:
-                            latest_filelist = FileList(self.storage.read(file), self.master_key)
+                            latest_filelist = FileList(self.storage.read(file), master_key)
                             latest_filelist_timestamp = timestamp
                         except CorruptedData as err:
                             raise FatalError(f'Unable to open file list "{file}"! Is it encrypted with a different key?') from err
+        return latest_filelist
 
-        source_abs = os.path.abspath(os.path.expanduser(self.args.source))
-        new_filelist = FileList()
-        self._scan_recursively(source_abs, '', new_filelist, latest_filelist)
-
-        # Write filelist to storage
-        new_filelist_name = '{}_{}'.format(
-            self.storage.get_identifier(),
-            datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        )
-        self.storage.write(new_filelist_name, new_filelist.to_bytes(self.master_key))
-
-    def _scan_recursively(self, path_abs, path_rel, new_filelist, old_filelist):
+    def _scan_recursively(self, path_abs, path_rel, new_filelist, old_filelist, excludes):
 
         for child in sorted(os.listdir(path_abs)):
             child_abs = os.path.join(path_abs, child)
@@ -300,7 +393,7 @@ class Syncer:
 
             # Check if this path should be excluded
             exclude = False
-            for exclude_re in self.args.excludes:
+            for exclude_re in excludes:
                 if exclude_re.search(child_abs):
                     exclude = True
                     break
@@ -315,7 +408,7 @@ class Syncer:
                 continue
 
             # Skip devices, pipes, sockets, etc.
-            child_stat = os.stat(child_abs)
+            child_stat = os.lstat(child_abs)
             child_mode = child_stat.st_mode
             child_perms = stat.S_IMODE(child_mode)
             if stat.S_ISBLK(child_mode) or stat.S_ISCHR(child_mode) or stat.S_ISFIFO(child_mode) or stat.S_ISSOCK(child_mode):
@@ -342,20 +435,13 @@ class Syncer:
                 child_hash = sha256_hash(child_bytes)
 
                 # Encrypt data
-                iv = child_hash[:16]
-                child_bytes_encrypted = aes_cbc_encrypt(child_bytes, child_hash, iv)
+                child_bytes_encrypted = aes_cbc_encrypt(child_bytes, child_hash, child_hash[:16])
 
                 # Get encrypted hash
                 child_crypthash_hex = sha256_hash(child_bytes_encrypted).hex().lower()
 
                 # Write encrypted file to storage, unless it already exists there
-                child_storagepath = 'storage/{}/{}/{}/{}/{}'.format(
-                    child_crypthash_hex[0:2],
-                    child_crypthash_hex[2:4],
-                    child_crypthash_hex[4:6],
-                    child_crypthash_hex[6:8],
-                    child_crypthash_hex,
-                )
+                child_storagepath = self._get_storage_path(child_crypthash_hex)
                 if self.storage.exists(child_storagepath):
                     print(f'{child_rel}: No upload needed')
                 else:
@@ -371,8 +457,8 @@ class Syncer:
             # Directory
             if os.path.isdir(child_abs):
                 print(child_rel)
-                new_filelist.add_dir(child_rel, child_perms)
-                self._scan_recursively(child_abs, child_rel, new_filelist, old_filelist)
+                new_filelist.add_dir(child_rel, child_stat.st_mtime, child_perms)
+                self._scan_recursively(child_abs, child_rel, new_filelist, old_filelist, excludes)
                 continue
 
 if __name__ == '__main__':
@@ -381,9 +467,13 @@ if __name__ == '__main__':
 
         args = Arguments()
 
-        syncer = Syncer(args)
+        if args.action == 'backup':
+            syncer = Syncer(args.destination)
+            syncer.do_backup(args.source, args.master_key, args.excludes)
 
-        syncer.run()
+        elif args.action == 'restore':
+            syncer = Syncer(args.source)
+            syncer.do_restore(args.destination, args.master_key)
 
     except FatalError as err:
         print(f'ERROR: {err}')
