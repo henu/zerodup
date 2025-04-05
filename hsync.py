@@ -178,7 +178,7 @@ class Arguments:
             regex = regex.replace('\\*', '.*')
             if raw_exclude.startswith('/'):
                 regex = f'^{regex}'
-                self.excludes.append(re.compile(regex))
+            self.excludes.append(re.compile(regex))
 
 
 class Syncer:
@@ -219,11 +219,19 @@ class Syncer:
         self.storage.write(new_filelist_name, new_filelist.to_bytes())
 
     def _scan_recursively(self, path_abs, path_rel, new_filelist, old_filelist):
-        # TODO: Obey excludes!
 
         for child in sorted(os.listdir(path_abs)):
             child_abs = os.path.join(path_abs, child)
             child_rel = os.path.join(path_rel, child)
+
+            # Check if this path should be excluded
+            exclude = False
+            for exclude_re in self.args.excludes:
+                if exclude_re.search(child_abs):
+                    exclude = True
+                    break
+            if exclude:
+                continue
 
             # Symlink
             if os.path.islink(child_abs):
