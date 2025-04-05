@@ -3,6 +3,7 @@ import argparse
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 import datetime
+import getpass
 import hashlib
 import json
 import os
@@ -244,11 +245,18 @@ class Syncer:
         self.args = args
 
         # Read possible encryption key
-        # TODO: If encryption key is not given, and no encryption is not requested either, ask it with input from user!
         self.master_key = None
         if self.args.key_file:
             with open(os.path.expanduser(self.args.key_file), 'r') as f:
                 master_key_raw = f.read().strip().encode('utf8')
+            self.master_key = sha256_hash(master_key_raw)
+        # If no key is given, and the encryption is still needed, ask key
+        elif self.args.encryption:
+            master_key_raw = getpass.getpass('Please enter encryption key: ')
+            master_key_raw_confirm = getpass.getpass('Confirm encryption key: ')
+            if master_key_raw != master_key_raw_confirm:
+                raise FatalError('Keys do not match!')
+            master_key_raw = master_key_raw.strip().encode('utf8')
             self.master_key = sha256_hash(master_key_raw)
 
         self.storage = build_storage_engine(self.args.destination)
