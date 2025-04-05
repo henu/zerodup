@@ -53,16 +53,18 @@ class FileList:
     def get_item(self, path):
         return self.items.get(path)
 
-    def add_dir(self, path):
+    def add_dir(self, path, perms):
         self.items[path] = {
             'type': 'dir',
+            'perms': perms,
         }
 
-    def add_file(self, path, size, mtime, hash_, crypthash):
+    def add_file(self, path, size, mtime, perms, hash_, crypthash):
         self.items[path] = {
             'type': 'file',
             'size': size,
             'mtime': mtime,
+            'perms': perms,
             'hash': hash_,
             'crypthash': crypthash,
         }
@@ -233,6 +235,7 @@ class Syncer:
             # Skip devices, pipes, sockets, etc.
             child_stat = os.stat(child_abs)
             child_mode = child_stat.st_mode
+            child_perms = stat.S_IMODE(child_mode)
             if stat.S_ISBLK(child_mode) or stat.S_ISCHR(child_mode) or stat.S_ISFIFO(child_mode) or stat.S_ISSOCK(child_mode):
                 print(f'{child_rel}: SKIP')
                 continue
@@ -245,7 +248,7 @@ class Syncer:
                     data = old_filelist.get_item(child_rel)
                     if data and data['type'] == 'file' and data['size'] == child_stat.st_size and data['mtime'] == child_stat.st_mtime:
                         print(f'{child_rel}: No changes')
-                        new_filelist.add_file(child_rel, child_stat.st_size, child_stat.st_mtime, data['hash'], data['crypthash'])
+                        new_filelist.add_file(child_rel, child_stat.st_size, child_stat.st_mtime, child_perms, data['hash'], data['crypthash'])
                         continue
 
                 # Data was not same, so create a new file. First find out its hashes.
@@ -287,14 +290,14 @@ class Syncer:
                     self.storage.write(child_storagepath, child_bytes_encrypted)
 
                 # Add file to filelist
-                new_filelist.add_file(child_rel, child_stat.st_size, child_stat.st_mtime, child_hash.hex().lower(), child_crypthash_hex)
+                new_filelist.add_file(child_rel, child_stat.st_size, child_stat.st_mtime, child_perms, child_hash.hex().lower(), child_crypthash_hex)
 
                 continue
 
             # Directory
             if os.path.isdir(child_abs):
                 print(child_rel)
-                new_filelist.add_dir(child_rel)
+                new_filelist.add_dir(child_rel, child_perms)
                 self._scan_recursively(child_abs, child_rel, new_filelist, old_filelist)
                 continue
 
