@@ -156,6 +156,9 @@ class Storage:
             self.makedirs(parent)
             self.mkdir(path)
 
+    def close(self):
+        pass
+
 
 class LocalStorage(Storage):
 
@@ -186,6 +189,65 @@ class LocalStorage(Storage):
         while path and path.startswith('/'):
             path = path[1:]
         return os.path.join(self.root, path)
+
+
+class SftpStorage(Storage):
+
+    def __init__(self, username, host, path):
+        import paramiko
+
+        self.root, self.identifier = os.path.split(path)
+
+        # Open SFTP connection
+        self.ssh_client = paramiko.SSHClient()
+        self.ssh_client.load_system_host_keys()
+        try:
+            self.ssh_client.connect(host, username=username)
+        except paramiko.ssh_exception.AuthenticationException:
+            # Try again with password
+            password = getpass.getpass(f'Please enter password for {username}@{host}: ')
+            self.ssh_client = paramiko.SSHClient()
+            self.ssh_client.load_system_host_keys()
+            try:
+                self.ssh_client.connect(host, username=username, password=password)
+            except paramiko.ssh_exception.AuthenticationException:
+                raise FatalError(f'Access denied for {username}@{host}!')
+        self.sftp_client = self.ssh_client.open_sftp()
+
+    def get_identifier(self):
+        return self.identifier
+
+    def exists(self, path):
+        try:
+            self.sftp_client.stat(self._fix_path(path))
+            return True
+        except FileNotFoundError:
+            return False
+
+    def listdir(self, path):
+        return self.sftp_client.listdir(self._fix_path(path))
+
+    def mkdir(self, path):
+        self.sftp_client.mkdir(self._fix_path(path))
+
+    def read(self, path):
+        with self.sftp_client.open(self._fix_path(path), 'rb') as f:
+            return f.read()
+
+    def write(self, path, contents):
+        with self.sftp_client.open(self._fix_path(path), 'wb') as f:
+            f.write(contents)
+
+    def close(self):
+        self.sftp_client.close()
+        self.ssh_client.close()
+
+    def _fix_path(self, path):
+        while path and path.startswith('/'):
+            path = path[1:]
+        return os.path.join(self.root, path)
+
+
 
 
 def build_storage_engine(url):
@@ -470,10 +532,12 @@ if __name__ == '__main__':
         if args.action == 'backup':
             syncer = Syncer(args.destination)
             syncer.do_backup(args.source, args.master_key, args.excludes)
+            syncer.close()
 
         elif args.action == 'restore':
             syncer = Syncer(args.source)
             syncer.do_restore(args.destination, args.master_key)
+            syncer.close()
 
     except FatalError as err:
         print(f'ERROR: {err}')
