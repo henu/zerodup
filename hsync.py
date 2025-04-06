@@ -5,11 +5,13 @@ from cryptography.hazmat.backends import default_backend
 import datetime
 import getpass
 import hashlib
+import io
 import json
 import os
 import re
 import stat
 import sys
+import tempfile
 import time
 
 
@@ -23,6 +25,104 @@ STORAGE_LOCAL_URL_RE = re.compile(f'^[fF][iI][lL][eE]://?(?P<path>/.*)$')
 FILELIST_RE = re.compile(f'^(?P<identifier>.*)_(?P<timestamp>{TIMESTAMP_RE_RAW})$')
 
 
+STREAM_CHUNK_SIZE = 10 * 1024 * 1024
+
+
+class BigBuffer:
+
+    WRITE_TO_DISK_LIMIT = 10 * 1024 * 1024
+
+    def __init__(self):
+        # In memory buffer
+        self.buf = b''
+        # On disk buffer
+        self.file = None
+        self.file_size = None
+        # Used on both memory and disk
+        self.read_pos = 0
+
+    def write(self, data):
+        # If not converted to file, and there is still space left
+        if not self.file and len(self.buf) + len(data) < BigBuffer.WRITE_TO_DISK_LIMIT:
+            self.buf += data
+            return
+
+        # If file is not created, then create it now
+        if not self.file:
+            # Initialize a new file
+            self.file = tempfile.NamedTemporaryFile('w+b')
+            # Empty buffer to it
+            self.file.write(self.buf)
+            self.file_size = len(self.buf)
+            self.buf = None
+
+        # Add new data to the end of file
+        self.file.seek(0, os.SEEK_END)
+        self.file.write(data)
+        self.file_size += len(data)
+
+    def read(self, size=-1):
+        # If data is stored on file
+        if self.file:
+            self.file.seek(self.read_pos)
+            read_amount = self.file_size - self.read_pos
+            if size >= 0:
+                read_amount = min(read_amount, size)
+            self.read_pos += read_amount
+            return self.file.read(read_amount)
+
+        # If data is stored in memory, and everything is requested
+        if size < 0 or size >= len(self.buf):
+            result = self.buf[self.read_pos:]
+            self.read_pos = len(self.buf)
+            return result
+
+        # If data is stored in memory, and only part is requested
+        result = self.buf[self.read_pos:self.read_pos + size]
+        self.read_pos += size
+        return result
+
+    def seek(self, offset, whence=0):
+        if whence == 0:
+            if self.file:
+                self.read_pos = max(0, min(self.file_size, offset))
+            else:
+                self.read_pos = max(0, min(len(self.buf), offset))
+        elif whence == 2:
+            if self.file:
+                self.read_pos = max(0, min(self.file_size, self.file_size + offset))
+            else:
+                self.read_pos = max(0, min(len(self.buf), len(self.buf) + offset))
+        else:
+            raise RuntimeError(f'Unsupported "whence" value: {whence}')
+
+    def tell(self):
+        return self.read_pos
+
+    def close(self):
+        if self.file:
+            self.file.close()
+        self.file = None
+        self.file_size = None
+        self.buf = None
+        self.read_pos = None
+
+    def truncate(self, size):
+        if self.file:
+            size = min(size, self.file_size)
+            self.file.truncate(size)
+            self.file_size = size
+        elif self.buf is not None:
+            size = min(size, len(self.buf))
+            self.buf = self.buf[:size]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+
 class CorruptedData(Exception):
     pass
 
@@ -32,43 +132,66 @@ class FatalError(Exception):
         super().__init__(msg)
 
 
-def sha256_hash(b):
+def sha256_hash(stream):
     hasher = hashlib.sha256()
-    hasher.update(b)
+    while chunk := stream.read(STREAM_CHUNK_SIZE):
+        hasher.update(chunk)
     return hasher.digest()
 
 
-def aes_cbc_encrypt(cleartext, key, iv):
+def aes_cbc_encrypt(cleartext_stream, key, iv):
     cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
     encryptor = cipher.encryptor()
-    padding = 16 - len(cleartext) % 16
-    cleartext_padded = cleartext + bytes([padding] * padding)
-    return encryptor.update(cleartext_padded) + encryptor.finalize()
+    cleartext_stream.seek(0, 2)
+    padding = 16 - cleartext_stream.tell() % 16
+    cleartext_stream.seek(0)
+    ciphertext_stream = BigBuffer()
+    while chunk := cleartext_stream.read(STREAM_CHUNK_SIZE):
+        ciphertext_stream.write(encryptor.update(chunk))
+    ciphertext_stream.write(encryptor.update(bytes([padding] * padding)))
+    ciphertext_stream.write(encryptor.finalize())
+    return ciphertext_stream
 
 
-def aes_cbc_decrypt(ciphertext, key, iv):
+def aes_cbc_decrypt(ciphertext_stream, key, iv):
     cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
     decryptor = cipher.decryptor()
+    cleartext_stream = BigBuffer()
     try:
-        cleartext_padded = decryptor.update(ciphertext) + decryptor.finalize()
+        while chunk := ciphertext_stream.read(STREAM_CHUNK_SIZE):
+            cleartext_stream.write(decryptor.update(chunk))
+        cleartext_stream.write(decryptor.finalize())
     except ValueError as err:
+        cleartext_stream.close()
         raise CorruptedData() from err
-    padding = cleartext_padded[-1]
-    return cleartext_padded[:-padding]
+    # Remove padding
+    cleartext_stream.seek(-1, 2)
+    content_size = cleartext_stream.tell() + 1
+    padding = cleartext_stream.read(1)[0]
+    cleartext_stream.seek(0)
+    cleartext_stream.truncate(content_size - padding)
+    return cleartext_stream
 
 
 class FileList:
 
-    def __init__(self, contents=None, encryption_key=None):
+    def __init__(self, contents_stream=None, encryption_key=None):
         self.items = {}
 
-        if contents and encryption_key:
-            iv = contents[0:16]
-            try:
-                contents = aes_cbc_decrypt(contents[16:], encryption_key, iv)
-            except CorruptedData:
-                # Maybe older file lists did not have encryption. Ignore for now.
-                pass
+        contents = None
+        if contents_stream:
+            if encryption_key:
+                iv = contents_stream.read(16)
+                try:
+                    decrypted_stream = aes_cbc_decrypt(contents_stream, encryption_key, iv)
+                    contents = decrypted_stream.read()
+                    decrypted_stream.close()
+                except CorruptedData:
+                    # Maybe older file lists did not have encryption. Ignore for now.
+                    pass
+            else:
+                contents = contents_stream.read()
+            contents_stream.close()
 
         if contents:
             try:
@@ -132,18 +255,24 @@ class FileList:
             'target': target,
         }
 
-    def to_bytes(self, encryption_key):
-        result = b''
+    def to_stream(self, encryption_key):
+        result_bytes = b''
         for path, data in sorted(self.items.items()):
             data = data.copy()
             data['path'] = path
-            result += json.dumps(data).encode('ascii') + b'\n'
+            result_bytes += json.dumps(data).encode('ascii') + b'\n'
 
         if encryption_key:
             iv = os.urandom(16)
-            result = iv + aes_cbc_encrypt(result, encryption_key, iv)
+            encrypted = aes_cbc_encrypt(io.BytesIO(result_bytes), encryption_key, iv)
+            result_stream = BigBuffer()
+            result_stream.write(iv)
+            while chunk := encrypted.read(STREAM_CHUNK_SIZE):
+                result_stream.write(chunk)
+            encrypted.close()
+            return result_stream
 
-        return result
+        return io.BytesIO(result_bytes)
 
 
 class Storage:
@@ -178,12 +307,16 @@ class LocalStorage(Storage):
         return os.mkdir(self._fix_path(path))
 
     def read(self, path):
-        with open(self._fix_path(path), 'rb') as f:
-            return f.read()
+        result = BigBuffer()
+        with open(self._fix_path(path), 'rb') as file:
+            while chunk := file.read(STREAM_CHUNK_SIZE):
+                result.write(chunk)
+        return result
 
-    def write(self, path, contents):
-        with open(self._fix_path(path), 'wb') as f:
-            f.write(contents)
+    def write(self, path, stream):
+        with open(self._fix_path(path), 'wb') as file:
+            while chunk := stream.read(STREAM_CHUNK_SIZE):
+                file.write(chunk)
 
     def _fix_path(self, path):
         while path and path.startswith('/'):
@@ -231,12 +364,16 @@ class SftpStorage(Storage):
         self.sftp_client.mkdir(self._fix_path(path))
 
     def read(self, path):
-        with self.sftp_client.open(self._fix_path(path), 'rb') as f:
-            return f.read()
+        result = BigBuffer()
+        with self.sftp_client.open(self._fix_path(path), 'rb') as file:
+            while chunk := file.read(STREAM_CHUNK_SIZE):
+                result.write(chunk)
+        return result
 
-    def write(self, path, contents):
-        with self.sftp_client.open(self._fix_path(path), 'wb') as f:
-            f.write(contents)
+    def write(self, path, stream):
+        with self.sftp_client.open(self._fix_path(path), 'wb') as file:
+            while chunk := stream.read(STREAM_CHUNK_SIZE):
+                file.write(chunk)
 
     def close(self):
         self.sftp_client.close()
@@ -328,9 +465,9 @@ class Arguments:
         # Read possible encryption key
         self.master_key = None
         if args.key_file:
-            with open(os.path.expanduser(args.key_file), 'r') as f:
-                master_key_raw = f.read().strip().encode('utf8')
-            self.master_key = sha256_hash(master_key_raw)
+            with open(os.path.expanduser(args.key_file), 'r') as file:
+                master_key_raw = file.read().strip().encode('utf8')
+            self.master_key = sha256_hash(io.BytesIO(master_key_raw))
         # If no key is given, and the encryption is still needed, ask key
         elif not args.no_encryption:
             master_key_raw = getpass.getpass('Please enter encryption key: ')
@@ -338,7 +475,7 @@ class Arguments:
             if master_key_raw != master_key_raw_confirm:
                 raise FatalError('Keys do not match!')
             master_key_raw = master_key_raw.strip().encode('utf8')
-            self.master_key = sha256_hash(master_key_raw)
+            self.master_key = sha256_hash(io.BytesIO(master_key_raw))
 
 
 class Syncer:
@@ -362,7 +499,9 @@ class Syncer:
             self.storage.get_identifier(),
             datetime.datetime.now(datetime.timezone.utc).isoformat(),
         )
-        self.storage.write(new_filelist_name, new_filelist.to_bytes(master_key))
+        new_filelist_stream = new_filelist.to_stream(master_key)
+        self.storage.write(new_filelist_name, new_filelist_stream)
+        new_filelist_stream.close()
 
     def do_restore(self, destination, master_key):
 
@@ -405,11 +544,14 @@ class Syncer:
             elif item['type'] == 'file':
                 # Decrypt file
                 item_encrypted_path = self._get_storage_path(item['crypthash'])
-                item_encrypted_bytes = self.storage.read(item_encrypted_path)
+                item_encrypted_stream = self.storage.read(item_encrypted_path)
                 item_hash = bytes.fromhex(item['hash'])
-                item_bytes = aes_cbc_decrypt(item_encrypted_bytes, item_hash, item_hash[:16])
-                with open(item_path_abs, 'wb') as f:
-                    f.write(item_bytes)
+                item_stream = aes_cbc_decrypt(item_encrypted_stream, item_hash, item_hash[:16])
+                item_encrypted_stream.close()
+                with open(item_path_abs, 'wb') as item_file:
+                    while chunk := item_stream.read(STREAM_CHUNK_SIZE):
+                        item_file.write(chunk)
+                item_stream.close()
                 if 'perms' in item:
                     os.chmod(item_path_abs, item['perms'])
 
@@ -493,19 +635,17 @@ class Syncer:
                         new_filelist.add_file(child_rel, child_stat.st_size, child_stat.st_mtime, child_perms, data['hash'], data['crypthash'])
                         continue
 
-                # Data was not same, so create a new file. First find out its hashes.
-                # TODO: If the file is huge, do this on disk rather than in memory!
-                with open(child_abs, 'rb') as f:
-                    child_bytes = f.read()
+                # Data was not same, so create a new file.
+                with open(child_abs, 'rb') as child_file:
+                    # Normal hash.
+                    child_hash = sha256_hash(child_file)
 
-                # Normal hash
-                child_hash = sha256_hash(child_bytes)
-
-                # Encrypt data
-                child_bytes_encrypted = aes_cbc_encrypt(child_bytes, child_hash, child_hash[:16])
+                    # Encrypt data
+                    child_file.seek(0)
+                    child_file_encrypted = aes_cbc_encrypt(child_file, child_hash, child_hash[:16])
 
                 # Get encrypted hash
-                child_crypthash_hex = sha256_hash(child_bytes_encrypted).hex().lower()
+                child_crypthash_hex = sha256_hash(child_file_encrypted).hex().lower()
 
                 # Write encrypted file to storage, unless it already exists there
                 child_storagepath = self._get_storage_path(child_crypthash_hex)
@@ -514,7 +654,11 @@ class Syncer:
                 else:
                     print(f'{child_rel}: Uploading...')
                     self.storage.makedirs(os.path.dirname(child_storagepath))
-                    self.storage.write(child_storagepath, child_bytes_encrypted)
+                    child_file_encrypted.seek(0)
+                    self.storage.write(child_storagepath, child_file_encrypted)
+
+                # Close buffer
+                child_file_encrypted.close()
 
                 # Add file to filelist
                 new_filelist.add_file(child_rel, child_stat.st_size, child_stat.st_mtime, child_perms, child_hash.hex().lower(), child_crypthash_hex)
