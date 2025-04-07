@@ -568,10 +568,10 @@ class Syncer:
 
     def _get_storage_path(self, crypthash_hex):
         return 'storage/{}/{}/{}/{}/{}'.format(
-            crypthash_hex[0:2],
-            crypthash_hex[2:4],
-            crypthash_hex[4:6],
-            crypthash_hex[6:8],
+            crypthash_hex[0],
+            crypthash_hex[1],
+            crypthash_hex[2],
+            crypthash_hex[3],
             crypthash_hex,
         )
 
