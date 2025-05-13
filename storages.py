@@ -13,8 +13,18 @@ def build_storage_engine(url):
     UNIX_USERNAME_RE_RAW = '([a-zA-Z0-9][a-zA-Z0-9._-]{0,30}[a-zA-Z0-9])'
     HOST_RE_RAW = '((?:[a-zA-Z0-9-]+\\.)+[a-zA-Z0-9-]+|^(?:\\d{1,3}\\.){3}\\d{1,3})'
 
+    STORAGE_B2_URL_RE = re.compile('^[bB]2://(?P<app_key_id>[0-9a-zA-Z\\-/]+):(?P<app_key>[0-9a-zA-Z\\-/]+):(?P<bucket>[0-9a-zA-Z\\-]+):(?P<identifier>[0-9a-zA-Z\\-]+)$')
     STORAGE_LOCAL_URL_RE = re.compile('^[fF][iI][lL][eE]://?(?P<path>/.*)$')
     STORAGE_SFTP_URL_RE = re.compile(f'^[sS][fF][tT][pP]://((?P<username>{UNIX_USERNAME_RE_RAW})@)?(?P<host>{HOST_RE_RAW})(?P<path>/.*)$')
+
+    # Backblaze
+    b2_match = STORAGE_B2_URL_RE.match(url)
+    if b2_match:
+        app_key_id = b2_match.groupdict()['app_key_id']
+        app_key = b2_match.groupdict()['app_key']
+        bucket = b2_match.groupdict()['bucket']
+        identifier = b2_match.groupdict()['identifier']
+        return BackBlazeStorage(app_key_id, app_key, bucket, identifier)
 
     # Local
     local_match = STORAGE_LOCAL_URL_RE.match(url)
@@ -243,6 +253,92 @@ class SftpStorage(DirectoryBasedStorage):
     def close(self):
         self.sftp_client.close()
         self.ssh_client.close()
+
+
+class BackBlazeStorage(Storage):
+
+    def __init__(self, app_key_id, app_key, bucket, identifier):
+        from b2sdk.v2 import AuthInfoCache, B2Api, InMemoryAccountInfo
+        info = InMemoryAccountInfo()
+        self.b2_api = B2Api(info, cache=AuthInfoCache(info))
+        self.b2_api.authorize_account('production', app_key_id, app_key)
+        self.bucket = self.b2_api.get_bucket_by_name(bucket)
+        self.identifier = identifier
+
+    def upload_new_filelist(self, stream):
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        from b2sdk.v2 import UploadSourceStream
+        stream_size = _get_stream_size(stream)
+        b2_stream = UploadSourceStream(lambda: stream, stream_size)
+        stream.seek(0)
+        self.bucket.upload(b2_stream, f'filelists/{self.identifier}/{now}')
+
+    def download_latest_filelist(self):
+        # Find the most recent filelist
+        latest_filelist_name = None
+        latest_filelist_timestamp = None
+        for file_version, folder_name in self.bucket.ls(f'filelists/{self.identifier}/'):
+            timestamp = datetime.datetime.fromisoformat(os.path.basename(file_version.file_name))
+            if latest_filelist_timestamp is None or latest_filelist_timestamp < timestamp:
+                latest_filelist_name = file_version.file_name
+                latest_filelist_timestamp = timestamp
+        if latest_filelist_name:
+            latest_filelist_stream = bigbuffer.BigBuffer()
+            latest_filelist_df = self.bucket.download_file_by_name(latest_filelist_name)
+            latest_filelist_df.save(latest_filelist_stream)
+            return latest_filelist_stream
+        return None
+
+    def entry_exists(self, crypthash_hex):
+        from b2sdk.exception import FileNotPresent
+        try:
+            info = self.bucket.get_file_info_by_name(f'entries/{crypthash_hex}')
+            return True
+        except FileNotPresent:
+            return False
+
+    def upload_entry(self, crypthash_hex, stream, progress_prefix=None):
+        from b2sdk.v2 import UploadSourceStream, AbstractProgressListener
+
+        # Construct a progress listener, if requested
+        progress_listener = None
+        if progress_prefix:
+            class ProgressListener(AbstractProgressListener):
+
+                def __init__(self, progress_prefix):
+                    self.progress_prefix = progress_prefix
+
+                def set_total_bytes(self, total_byte_count):
+                    self.total_byte_count = total_byte_count
+
+                def bytes_completed(self, byte_count):
+                    progress = int(100 * byte_count / self.total_byte_count)
+                    print(f'\r{self.progress_prefix}{progress} %', end='', flush=True)
+
+                def close(self):
+                    pass
+
+            progress_listener = ProgressListener(progress_prefix)
+
+        # Prepare stream
+        stream_size = _get_stream_size(stream)
+        b2_stream = UploadSourceStream(lambda: stream, stream_size)
+        stream.seek(0)
+
+        # Upload
+        self.bucket.upload(b2_stream, f'entries/{crypthash_hex}', progress_listener=progress_listener)
+
+        if progress_prefix:
+            print()
+
+    def download_entry(self, crypthash_hex):
+        stream = bigbuffer.BigBuffer()
+        df = self.bucket.download_file_by_name(f'entries/{crypthash_hex}')
+        df.save(stream)
+        return stream
+
+    def close(self):
+        pass
 
 
 def _get_stream_size(stream):
