@@ -293,6 +293,13 @@ class Storage:
     def close(self):
         pass
 
+    def _get_stream_size(self, stream):
+        pos = stream.tell()
+        stream.seek(0, os.SEEK_END)
+        stream_size = stream.tell()
+        stream.seek(pos)
+        return stream_size
+
 
 class LocalStorage(Storage):
 
@@ -318,10 +325,20 @@ class LocalStorage(Storage):
                 result.write(chunk)
         return result
 
-    def write(self, path, stream):
+    def write(self, path, stream, progress_prefix=None):
+        if progress_prefix:
+            stream_size = self._get_stream_size(stream)
+            print(f'{progress_prefix}0 %', end='', flush=True)
+            stream_read = 0
         with open(self._fix_path(path), 'wb') as file:
             while chunk := stream.read(STREAM_CHUNK_SIZE):
                 file.write(chunk)
+                if progress_prefix:
+                    stream_read += len(chunk)
+                    write_progress = int(100 * stream_read / stream_size)
+                    print(f'\r{progress_prefix}{write_progress} %', end='', flush=True)
+        if progress_prefix:
+            print()
 
     def _fix_path(self, path):
         while path and path.startswith('/'):
@@ -375,10 +392,20 @@ class SftpStorage(Storage):
                 result.write(chunk)
         return result
 
-    def write(self, path, stream):
+    def write(self, path, stream, progress_prefix=None):
+        if progress_prefix:
+            stream_size = self._get_stream_size(stream)
+            print(f'{progress_prefix}0 %', end='', flush=True)
+            stream_read = 0
         with self.sftp_client.open(self._fix_path(path), 'wb') as file:
             while chunk := stream.read(STREAM_CHUNK_SIZE):
                 file.write(chunk)
+                if progress_prefix:
+                    stream_read += len(chunk)
+                    write_progress = int(100 * stream_read / stream_size)
+                    print(f'\r{progress_prefix}{write_progress} %', end='', flush=True)
+        if progress_prefix:
+            print()
 
     def close(self):
         self.sftp_client.close()
@@ -657,10 +684,9 @@ class Syncer:
                 if self.storage.exists(child_storagepath):
                     print(f'{child_rel}: No upload needed')
                 else:
-                    print(f'{child_rel}: Uploading...')
                     self.storage.makedirs(os.path.dirname(child_storagepath))
                     child_file_encrypted.seek(0)
-                    self.storage.write(child_storagepath, child_file_encrypted)
+                    self.storage.write(child_storagepath, child_file_encrypted, f'{child_rel}: Uploading: ')
 
                 # Close buffer
                 child_file_encrypted.close()
