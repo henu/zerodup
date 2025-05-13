@@ -75,6 +75,8 @@ class BigBuffer:
         else:
             raise RuntimeError(f'Unsupported "whence" value: {whence}')
 
+        return self.read_pos
+
     def tell(self):
         return self.read_pos
 
@@ -94,6 +96,9 @@ class BigBuffer:
         elif self.buf is not None:
             size = min(size, len(self.buf))
             self.buf = self.buf[:size]
+
+    def flush(self):
+        pass
 
     def __enter__(self):
         return self

@@ -13,8 +13,14 @@ def build_storage_engine(url):
     UNIX_USERNAME_RE_RAW = '([a-zA-Z0-9][a-zA-Z0-9._-]{0,30}[a-zA-Z0-9])'
     HOST_RE_RAW = '((?:[a-zA-Z0-9-]+\\.)+[a-zA-Z0-9-]+|^(?:\\d{1,3}\\.){3}\\d{1,3})'
 
-    STORAGE_SFTP_URL_RE = re.compile(f'^[sS][fF][tT][pP]://((?P<username>{UNIX_USERNAME_RE_RAW})@)?(?P<host>{HOST_RE_RAW})(?P<path>/.*)$')
     STORAGE_LOCAL_URL_RE = re.compile('^[fF][iI][lL][eE]://?(?P<path>/.*)$')
+    STORAGE_SFTP_URL_RE = re.compile(f'^[sS][fF][tT][pP]://((?P<username>{UNIX_USERNAME_RE_RAW})@)?(?P<host>{HOST_RE_RAW})(?P<path>/.*)$')
+
+    # Local
+    local_match = STORAGE_LOCAL_URL_RE.match(url)
+    if local_match:
+        path = local_match.groupdict()['path']
+        return LocalStorage(path)
 
     # SFTP
     sftp_match = STORAGE_SFTP_URL_RE.match(url)
@@ -24,13 +30,7 @@ def build_storage_engine(url):
         path = sftp_match.groupdict()['path']
         return SftpStorage(username, host, path)
 
-    # Local
-    local_match = STORAGE_LOCAL_URL_RE.match(url)
-    if local_match:
-        path = local_match.groupdict()['path']
-        return LocalStorage(path)
-
-    raise RuntimeError(f'URL {url} not supported!')
+    raise RuntimeError(f'URL "{url}" is not supported!')
 
 
 class Storage:
@@ -97,6 +97,7 @@ class DirectoryBasedStorage(Storage):
                 if filelist_match.groupdict()['identifier'] == self.get_identifier():
                     timestamp = datetime.datetime.fromisoformat(filelist_match.groupdict()['timestamp'])
                     if latest_filelist_timestamp is None or latest_filelist_timestamp < timestamp:
+                        # TODO: Why this is read immediately?
                         latest_filelist = self.read(file)
                         latest_filelist_timestamp = timestamp
         return latest_filelist
@@ -132,13 +133,6 @@ class DirectoryBasedStorage(Storage):
             crypthash_hex,
         )
 
-    def _get_stream_size(self, stream):
-        pos = stream.tell()
-        stream.seek(0, os.SEEK_END)
-        stream_size = stream.tell()
-        stream.seek(pos)
-        return stream_size
-
     def _makedirs(self, path):
         if not path or path == '/':
             return
@@ -171,7 +165,7 @@ class LocalStorage(DirectoryBasedStorage):
 
     def write(self, path, stream, progress_prefix=None):
         if progress_prefix:
-            stream_size = self._get_stream_size(stream)
+            stream_size = _get_stream_size(stream)
             print(f'{progress_prefix}0 %', end='', flush=True)
             stream_read = 0
         with open(self._fix_path(path), 'wb') as file:
@@ -233,7 +227,7 @@ class SftpStorage(DirectoryBasedStorage):
 
     def write(self, path, stream, progress_prefix=None):
         if progress_prefix:
-            stream_size = self._get_stream_size(stream)
+            stream_size = _get_stream_size(stream)
             print(f'{progress_prefix}0 %', end='', flush=True)
             stream_read = 0
         with self.sftp_client.open(self._fix_path(path), 'wb') as file:
@@ -249,3 +243,11 @@ class SftpStorage(DirectoryBasedStorage):
     def close(self):
         self.sftp_client.close()
         self.ssh_client.close()
+
+
+def _get_stream_size(stream):
+    pos = stream.tell()
+    stream.seek(0, os.SEEK_END)
+    stream_size = stream.tell()
+    stream.seek(pos)
+    return stream_size
