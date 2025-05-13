@@ -147,7 +147,7 @@ def sha256_hash(stream):
 def aes_cbc_encrypt(cleartext_stream, key, iv):
     cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
     encryptor = cipher.encryptor()
-    cleartext_stream.seek(0, 2)
+    cleartext_stream.seek(0, os.SEEK_END)
     padding = 16 - cleartext_stream.tell() % 16
     cleartext_stream.seek(0)
     ciphertext_stream = BigBuffer()
@@ -170,7 +170,7 @@ def aes_cbc_decrypt(ciphertext_stream, key, iv):
         cleartext_stream.close()
         raise CorruptedData() from err
     # Remove padding
-    cleartext_stream.seek(-1, 2)
+    cleartext_stream.seek(-1, os.SEEK_END)
     content_size = cleartext_stream.tell() + 1
     padding = cleartext_stream.read(1)[0]
     cleartext_stream.seek(0)
