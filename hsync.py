@@ -649,7 +649,11 @@ class Syncer:
                 continue
 
             # Skip devices, pipes, sockets, etc.
-            child_stat = os.lstat(child_abs)
+            try:
+                child_stat = os.lstat(child_abs)
+            except FileNotFoundError:
+                print(f'{child_rel}: NOT FOUND!')
+                continue
             child_mode = child_stat.st_mode
             child_perms = stat.S_IMODE(child_mode)
             if stat.S_ISBLK(child_mode) or stat.S_ISCHR(child_mode) or stat.S_ISFIFO(child_mode) or stat.S_ISSOCK(child_mode):
@@ -668,13 +672,17 @@ class Syncer:
                         continue
 
                 # Data was not same, so create a new file.
-                with open(child_abs, 'rb') as child_file:
-                    # Normal hash.
-                    child_hash = sha256_hash(child_file)
+                try:
+                    with open(child_abs, 'rb') as child_file:
+                        # Normal hash.
+                        child_hash = sha256_hash(child_file)
 
-                    # Encrypt data
-                    child_file.seek(0)
-                    child_file_encrypted = aes_cbc_encrypt(child_file, child_hash, child_hash[:16])
+                        # Encrypt data
+                        child_file.seek(0)
+                        child_file_encrypted = aes_cbc_encrypt(child_file, child_hash, child_hash[:16])
+                except FileNotFoundError:
+                    print(f'{child_rel}: NOT FOUND!')
+                    continue
 
                 # Get encrypted hash
                 child_crypthash_hex = sha256_hash(child_file_encrypted).hex().lower()
