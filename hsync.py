@@ -30,7 +30,11 @@ STREAM_CHUNK_SIZE = 10 * 1024 * 1024
 
 class BigBuffer:
 
-    WRITE_TO_DISK_LIMIT = 10 * 1024 * 1024
+    DEFAULT_MEMORY_LIMIT = 10 * 1024 * 1024
+
+    @classmethod
+    def set_memory_limit(cls, limit):
+        cls.custom_memory_limit = limit
 
     def __init__(self):
         # In memory buffer
@@ -43,7 +47,8 @@ class BigBuffer:
 
     def write(self, data):
         # If not converted to file, and there is still space left
-        if not self.file and len(self.buf) + len(data) < BigBuffer.WRITE_TO_DISK_LIMIT:
+        memory_limit = getattr(BigBuffer, 'custom_memory_limit', BigBuffer.DEFAULT_MEMORY_LIMIT)
+        if not self.file and len(self.buf) + len(data) < memory_limit:
             self.buf += data
             return
 
@@ -675,6 +680,15 @@ class Syncer:
 if __name__ == '__main__':
 
     try:
+
+        # If free memory info is available, then use 10 % of that for buffers
+        try:
+            import psutil
+            memory_available = psutil.virtual_memory().available
+            memory_limit = max(10 * 1024 * 1024, psutil.virtual_memory().available // 10)
+            BigBuffer.set_memory_limit(memory_limit)
+        except:
+            pass
 
         args = Arguments()
 
