@@ -13,6 +13,7 @@ class Syncer:
 
     def __init__(self, storage_url):
         self.storage = storages.build_storage_engine(storage_url)
+        self.existing_entries = set()
 
     def close(self):
         self.storage.close()
@@ -161,7 +162,10 @@ class Syncer:
                 child_crypthash_hex = crypto.sha256_hash(child_file_encrypted).hex().lower()
 
                 # Write encrypted file to storage, unless it already exists there
-                if self.storage.entry_exists(child_crypthash_hex):
+                if child_crypthash_hex in self.existing_entries:
+                    print(f'{child_rel}: No upload needed')
+                elif self.storage.entry_exists(child_crypthash_hex):
+                    self.existing_entries.add(child_crypthash_hex)
                     print(f'{child_rel}: No upload needed')
                 else:
                     self.storage.upload_entry(child_crypthash_hex, child_file_encrypted, f'{child_rel}: Uploading: ')
