@@ -282,16 +282,99 @@ class FileList:
 
 class Storage:
 
-    def makedirs(self, path):
-        if not path or path == '/':
-            return
-        if not self.exists(path):
-            parent = os.path.dirname(path)
-            self.makedirs(parent)
-            self.mkdir(path)
+    def upload_new_filelist(self, stream):
+        raise NotImplementedError()
+
+    def download_latest_filelist(self):
+        raise NotImplementedError()
+
+    def entry_exists(self, crypthash_hex):
+        raise NotImplementedError()
+
+    def upload_entry(self, crypthash_hex, stream, progress_prefix=None):
+        raise NotImplementedError()
+
+    def download_entry(self, crypthash_hex):
+        raise NotImplementedError()
 
     def close(self):
         pass
+
+
+class DirectoryBasedStorage(Storage):
+
+    def __init__(self, path):
+        self.root, self.identifier = os.path.split(path)
+
+    def get_identifier(self):
+        raise NotImplementedError()
+
+    def exists(self, path):
+        raise NotImplementedError()
+
+    def listdir(self, path):
+        raise NotImplementedError()
+
+    def mkdir(self, path):
+        raise NotImplementedError()
+
+    def read(self, path):
+        raise NotImplementedError()
+
+    def write(self, path, stream, progress_prefix=None):
+        raise NotImplementedError()
+
+    def upload_new_filelist(self, stream):
+        new_filelist_name = '{}_{}'.format(
+            self.get_identifier(),
+            datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        )
+        self.write(new_filelist_name, stream)
+        stream.close()
+
+    def download_latest_filelist(self):
+        # Find the most recent filelist and download it. Go files in
+        # reversed order, hoping to find the most recent filelist first.
+        latest_filelist = None
+        latest_filelist_timestamp = None
+        for file in sorted(self.listdir('/'), reverse=True):
+            # Check if this is a filelist
+            filelist_match = FILELIST_RE.match(file)
+            if filelist_match:
+                if filelist_match.groupdict()['identifier'] == self.get_identifier():
+                    timestamp = datetime.datetime.fromisoformat(filelist_match.groupdict()['timestamp'])
+                    if latest_filelist_timestamp is None or latest_filelist_timestamp < timestamp:
+                        latest_filelist = self.read(file)
+                        latest_filelist_timestamp = timestamp
+        return latest_filelist
+
+    def entry_exists(self, crypthash_hex):
+        path = self._get_storage_path(crypthash_hex)
+        return self.exists(path)
+
+    def upload_entry(self, crypthash_hex, stream, progress_prefix=None):
+        path = self._get_storage_path(crypthash_hex)
+        self._makedirs(os.path.dirname(path))
+        stream.seek(0)
+        self.write(path, stream, progress_prefix)
+
+    def download_entry(self, crypthash_hex):
+        path = self._get_storage_path(crypthash_hex)
+        return self.read(item_encrypted_path)
+
+    def _fix_path(self, path):
+        while path and path.startswith('/'):
+            path = path[1:]
+        return os.path.join(self.root, path)
+
+    def _get_storage_path(self, crypthash_hex):
+        return 'storage/{}/{}/{}/{}/{}'.format(
+            crypthash_hex[0],
+            crypthash_hex[1],
+            crypthash_hex[2],
+            crypthash_hex[3],
+            crypthash_hex,
+        )
 
     def _get_stream_size(self, stream):
         pos = stream.tell()
@@ -300,11 +383,17 @@ class Storage:
         stream.seek(pos)
         return stream_size
 
+    def _makedirs(self, path):
+        if not path or path == '/':
+            return
+        if not self.exists(path):
+            parent = os.path.dirname(path)
+            self._makedirs(parent)
+            self.mkdir(path)
 
-class LocalStorage(Storage):
 
-    def __init__(self, path):
-        self.root, self.identifier = os.path.split(path)
+
+class LocalStorage(DirectoryBasedStorage):
 
     def get_identifier(self):
         return self.identifier
@@ -340,13 +429,8 @@ class LocalStorage(Storage):
         if progress_prefix:
             print()
 
-    def _fix_path(self, path):
-        while path and path.startswith('/'):
-            path = path[1:]
-        return os.path.join(self.root, path)
 
-
-class SftpStorage(Storage):
+class SftpStorage(DirectoryBasedStorage):
 
     def __init__(self, username, host, path):
         import paramiko
@@ -410,13 +494,6 @@ class SftpStorage(Storage):
     def close(self):
         self.sftp_client.close()
         self.ssh_client.close()
-
-    def _fix_path(self, path):
-        while path and path.startswith('/'):
-            path = path[1:]
-        return os.path.join(self.root, path)
-
-
 
 
 def build_storage_engine(url):
@@ -527,13 +604,7 @@ class Syncer:
         self._scan_recursively(source_abs, '', new_filelist, latest_filelist, excludes)
 
         # Write filelist to storage
-        new_filelist_name = '{}_{}'.format(
-            self.storage.get_identifier(),
-            datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        )
-        new_filelist_stream = new_filelist.to_stream(master_key)
-        self.storage.write(new_filelist_name, new_filelist_stream)
-        new_filelist_stream.close()
+        self.storage.upload_new_filelist(new_filelist.to_stream(master_key))
 
     def do_restore(self, destination, master_key):
 
@@ -575,8 +646,7 @@ class Syncer:
             # Create file
             elif item['type'] == 'file':
                 # Decrypt file
-                item_encrypted_path = self._get_storage_path(item['crypthash'])
-                item_encrypted_stream = self.storage.read(item_encrypted_path)
+                item_encrypted_stream = self.storage.download_entry(item['crypthash'])
                 item_hash = bytes.fromhex(item['hash'])
                 item_stream = aes_cbc_decrypt(item_encrypted_stream, item_hash, item_hash[:16])
                 item_encrypted_stream.close()
@@ -598,33 +668,15 @@ class Syncer:
             if 'mtime' in item and item['type'] != 'link':
                 os.utime(item_path_abs, (time.time(), item['mtime']))
 
-    def _get_storage_path(self, crypthash_hex):
-        return 'storage/{}/{}/{}/{}/{}'.format(
-            crypthash_hex[0],
-            crypthash_hex[1],
-            crypthash_hex[2],
-            crypthash_hex[3],
-            crypthash_hex,
-        )
-
     def _find_latest_filelist(self, master_key):
-        # Find the most recent filelist and download it. Go files in
-        # reversed order, hoping to find the most recent filelist first.
-        latest_filelist = None
-        latest_filelist_timestamp = None
-        for file in sorted(self.storage.listdir('/'), reverse=True):
-            # Check if this is a filelist
-            filelist_match = FILELIST_RE.match(file)
-            if filelist_match:
-                if filelist_match.groupdict()['identifier'] == self.storage.get_identifier():
-                    timestamp = datetime.datetime.fromisoformat(filelist_match.groupdict()['timestamp'])
-                    if latest_filelist_timestamp is None or latest_filelist_timestamp < timestamp:
-                        try:
-                            latest_filelist = FileList(self.storage.read(file), master_key)
-                            latest_filelist_timestamp = timestamp
-                        except CorruptedData as err:
-                            raise FatalError(f'Unable to open file list "{file}"! Is it encrypted with a different key?') from err
-        return latest_filelist
+        latest_filelist = self.storage.download_latest_filelist()
+        if latest_filelist:
+            try:
+                return FileList(latest_filelist, master_key)
+            except CorruptedData as err:
+                raise FatalError(f'Unable to open latest file list! Is it encrypted with a different key?') from err
+        return None
+
 
     def _scan_recursively(self, path_abs, path_rel, new_filelist, old_filelist, excludes):
 
@@ -688,13 +740,10 @@ class Syncer:
                 child_crypthash_hex = sha256_hash(child_file_encrypted).hex().lower()
 
                 # Write encrypted file to storage, unless it already exists there
-                child_storagepath = self._get_storage_path(child_crypthash_hex)
-                if self.storage.exists(child_storagepath):
+                if self.storage.entry_exists(child_crypthash_hex):
                     print(f'{child_rel}: No upload needed')
                 else:
-                    self.storage.makedirs(os.path.dirname(child_storagepath))
-                    child_file_encrypted.seek(0)
-                    self.storage.write(child_storagepath, child_file_encrypted, f'{child_rel}: Uploading: ')
+                    self.storage.upload_entry(child_crypthash_hex, child_file_encrypted, f'{child_rel}: Uploading: ')
 
                 # Close buffer
                 child_file_encrypted.close()
