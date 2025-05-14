@@ -265,6 +265,24 @@ class BackBlazeStorage(Storage):
         self.bucket = self.b2_api.get_bucket_by_name(bucket)
         self.identifier = identifier
 
+        # Asking if entries exist or not makes a lot of API calls. That's why there is this cache system for this
+        self.entry_existence_cache = set()
+        self.entry_existence_cache_new = set()
+        for file_version, folder_name in self.bucket.ls(f'entry_existence_cache/'):
+            timestamp = datetime.datetime.fromisoformat(os.path.basename(file_version.file_name))
+            # If file is too old, then delete it
+            if timestamp < datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=30):
+                self.bucket.delete_file_version(file_version.id_, file_version.file_name)
+            # If file is new enough, then read its contents to cache
+            else:
+                buf = bigbuffer.BigBuffer()
+                df = self.bucket.download_file_by_id(file_version.id_)
+                df.save(buf)
+                for crypthash_hex in buf.read().decode('ascii').splitlines():
+                    crypthash_hex = crypthash_hex.strip()
+                    if crypthash_hex:
+                        self.entry_existence_cache.add(crypthash_hex)
+
     def upload_new_filelist(self, stream):
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         from b2sdk.v2 import UploadSourceStream
@@ -290,9 +308,14 @@ class BackBlazeStorage(Storage):
         return None
 
     def entry_exists(self, crypthash_hex):
+        # First check cache
+        if crypthash_hex in self.entry_existence_cache or crypthash_hex in self.entry_existence_cache_new:
+            return True
+        # Then check from the cloud
         from b2sdk.exception import FileNotPresent
         try:
             info = self.bucket.get_file_info_by_name(f'entries/{crypthash_hex}')
+            self._add_to_entry_existence_cache_new(crypthash_hex)
             return True
         except FileNotPresent:
             return False
@@ -331,6 +354,10 @@ class BackBlazeStorage(Storage):
         if progress_prefix:
             print()
 
+        # If cache is not aware of this, then update it
+        if crypthash_hex not in self.entry_existence_cache and crypthash_hex not in self.entry_existence_cache_new:
+            self._add_to_entry_existence_cache_new(crypthash_hex)
+
     def download_entry(self, crypthash_hex):
         stream = bigbuffer.BigBuffer()
         df = self.bucket.download_file_by_name(f'entries/{crypthash_hex}')
@@ -340,6 +367,23 @@ class BackBlazeStorage(Storage):
     def close(self):
         pass
 
+    def _add_to_entry_existence_cache_new(self, crypthash_hex):
+        from b2sdk.v2 import UploadSourceStream
+        self.entry_existence_cache_new.add(crypthash_hex)
+        # If cache has grown too big, then upload it to cloud
+        if len(self.entry_existence_cache_new) >= 1000:
+            # Upload to cloud
+            buf = bigbuffer.BigBuffer()
+            for crypthash_hex in sorted(self.entry_existence_cache_new):
+                buf.write((crypthash_hex + '\n').encode('ascii'))
+            buf_size = _get_stream_size(buf)
+            b2_stream = UploadSourceStream(lambda: buf, buf_size)
+            buf.seek(0)
+            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            self.bucket.upload(b2_stream, f'entry_existence_cache/{now}')
+            # Add to old cache, and clear the new one
+            self.entry_existence_cache |= self.entry_existence_cache_new
+            self.entry_existence_cache_new = set()
 
 def _get_stream_size(stream):
     pos = stream.tell()
