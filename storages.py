@@ -268,7 +268,7 @@ class BackBlazeStorage(Storage):
         # Asking if entries exist or not makes a lot of API calls. That's why there is this cache system for this
         self.entry_existence_cache = set()
         self.entry_existence_cache_new = set()
-        for file_version, folder_name in self.bucket.ls(f'entry_existence_cache/'):
+        for file_version, folder_name in self.bucket.ls('entry_existence_cache/'):
             timestamp = datetime.datetime.fromisoformat(os.path.basename(file_version.file_name))
             # If file is too old, then delete it
             if timestamp < datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=30):
@@ -278,6 +278,7 @@ class BackBlazeStorage(Storage):
                 buf = bigbuffer.BigBuffer()
                 df = self.bucket.download_file_by_id(file_version.id_)
                 df.save(buf)
+                buf.seek(0)
                 for crypthash_hex in buf.read().decode('ascii').splitlines():
                     crypthash_hex = crypthash_hex.strip()
                     if crypthash_hex:
@@ -287,7 +288,7 @@ class BackBlazeStorage(Storage):
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         from b2sdk.v2 import UploadSourceStream
         stream_size = _get_stream_size(stream)
-        b2_stream = UploadSourceStream(lambda: stream, stream_size)
+        b2_stream = UploadSourceStream(self.BigBufferOpener(stream), stream_size)
         stream.seek(0)
         self.bucket.upload(b2_stream, f'filelists/{self.identifier}/{now}')
 
@@ -304,6 +305,7 @@ class BackBlazeStorage(Storage):
             latest_filelist_stream = bigbuffer.BigBuffer()
             latest_filelist_df = self.bucket.download_file_by_name(latest_filelist_name)
             latest_filelist_df.save(latest_filelist_stream)
+            latest_filelist_stream.seek(0)
             return latest_filelist_stream
         return None
 
@@ -345,8 +347,7 @@ class BackBlazeStorage(Storage):
 
         # Prepare stream
         stream_size = _get_stream_size(stream)
-        b2_stream = UploadSourceStream(lambda: stream, stream_size)
-        stream.seek(0)
+        b2_stream = UploadSourceStream(self.BigBufferOpener(stream), stream_size)
 
         # Upload
         self.bucket.upload(b2_stream, f'entries/{crypthash_hex}', progress_listener=progress_listener)
@@ -362,6 +363,7 @@ class BackBlazeStorage(Storage):
         stream = bigbuffer.BigBuffer()
         df = self.bucket.download_file_by_name(f'entries/{crypthash_hex}')
         df.save(stream)
+        stream.seek(0)
         return stream
 
     def close(self):
@@ -384,6 +386,15 @@ class BackBlazeStorage(Storage):
             # Add to old cache, and clear the new one
             self.entry_existence_cache |= self.entry_existence_cache_new
             self.entry_existence_cache_new = set()
+
+    class BigBufferOpener:
+
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __call__(self):
+            return self.stream.cloned_new_instance()
+
 
 def _get_stream_size(stream):
     pos = stream.tell()

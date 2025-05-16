@@ -19,6 +19,17 @@ class BigBuffer:
         # Used on both memory and disk
         self.read_pos = 0
 
+        self.closed = False
+
+    def cloned_new_instance(self):
+        clone = BigBuffer()
+        clone.buf = self.buf
+        clone.file = self.file
+        clone.file_size = self.file_size
+        clone.read_pos = 0
+        clone.closed = False
+        return clone
+
     def write(self, data):
         # If not converted to file, and there is still space left
         memory_limit = getattr(BigBuffer, 'custom_memory_limit', BigBuffer.DEFAULT_MEMORY_LIMIT)
@@ -61,6 +72,9 @@ class BigBuffer:
         self.read_pos += size
         return result
 
+    def seekable(self):
+        return True
+
     def seek(self, offset, whence=os.SEEK_SET):
         if whence == os.SEEK_SET:
             if self.file:
@@ -81,12 +95,7 @@ class BigBuffer:
         return self.read_pos
 
     def close(self):
-        if self.file:
-            self.file.close()
-        self.file = None
-        self.file_size = None
-        self.buf = None
-        self.read_pos = None
+        self.closed = True
 
     def truncate(self, size):
         if self.file:
