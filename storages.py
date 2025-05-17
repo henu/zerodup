@@ -1,6 +1,7 @@
 import bigbuffer
 import constants
 import exceptions
+import utils
 
 import datetime
 import getpass
@@ -176,7 +177,7 @@ class LocalStorage(DirectoryBasedStorage):
     def write(self, path, stream, progress_prefix=None):
         if progress_prefix:
             stream_size = _get_stream_size(stream)
-            print(f'{progress_prefix}0 %', end='', flush=True)
+            utils.print_limited(f'{progress_prefix}0 %', end='', flush=True)
             stream_read = 0
         with open(self._fix_path(path), 'wb') as file:
             while chunk := stream.read(constants.STREAM_CHUNK_SIZE):
@@ -184,7 +185,7 @@ class LocalStorage(DirectoryBasedStorage):
                 if progress_prefix:
                     stream_read += len(chunk)
                     write_progress = int(100 * stream_read / stream_size)
-                    print(f'\r{progress_prefix}{write_progress} %', end='', flush=True)
+                    utils.print_limited(f'\r{progress_prefix}{write_progress} %', end='', flush=True)
         if progress_prefix:
             print()
 
@@ -238,7 +239,7 @@ class SftpStorage(DirectoryBasedStorage):
     def write(self, path, stream, progress_prefix=None):
         if progress_prefix:
             stream_size = _get_stream_size(stream)
-            print(f'{progress_prefix}0 %', end='', flush=True)
+            utils.print_limited(f'{progress_prefix}0 %', end='', flush=True)
             stream_read = 0
         with self.sftp_client.open(self._fix_path(path), 'wb') as file:
             while chunk := stream.read(constants.STREAM_CHUNK_SIZE):
@@ -246,7 +247,7 @@ class SftpStorage(DirectoryBasedStorage):
                 if progress_prefix:
                     stream_read += len(chunk)
                     write_progress = int(100 * stream_read / stream_size)
-                    print(f'\r{progress_prefix}{write_progress} %', end='', flush=True)
+                    utils.print_limited(f'\r{progress_prefix}{write_progress} %', end='', flush=True)
         if progress_prefix:
             print()
 
@@ -338,7 +339,7 @@ class BackBlazeStorage(Storage):
 
                 def bytes_completed(self, byte_count):
                     progress = int(100 * byte_count / self.total_byte_count)
-                    print(f'\r{self.progress_prefix}{progress} %', end='', flush=True)
+                    utils.print_limited(f'\r{self.progress_prefix}{progress} %', end='', flush=True)
 
                 def close(self):
                     pass

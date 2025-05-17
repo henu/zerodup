@@ -3,6 +3,7 @@ import crypto
 import exceptions
 import filelist
 import storages
+import utils
 
 import os
 import stat
@@ -48,7 +49,7 @@ class Syncer:
 
         # Start restore
         for item in latest_filelist.get_items():
-            print(item['path'])
+            utils.print_limited(item['path'])
 
             # Get absolute path, and make sure parent directory exists
             item_path_abs = os.path.join(destination_abs, item['path'])
@@ -118,7 +119,7 @@ class Syncer:
             # Symlink
             if os.path.islink(child_abs):
                 link_target = os.readlink(child_abs)
-                print(f'{child_rel} -> {link_target}')
+                utils.print_limited(f'{child_rel}', ' -> ', f'{link_target}')
                 new_filelist.add_link(child_rel, link_target)
                 continue
 
@@ -126,12 +127,12 @@ class Syncer:
             try:
                 child_stat = os.lstat(child_abs)
             except FileNotFoundError:
-                print(f'{child_rel}: NOT FOUND!')
+                utils.print_limited(f'{child_rel}: NOT FOUND!')
                 continue
             child_mode = child_stat.st_mode
             child_perms = stat.S_IMODE(child_mode)
             if stat.S_ISBLK(child_mode) or stat.S_ISCHR(child_mode) or stat.S_ISFIFO(child_mode) or stat.S_ISSOCK(child_mode):
-                print(f'{child_rel}: SKIP')
+                utils.print_limited(f'{child_rel}: SKIP')
                 continue
 
             # Regular file
@@ -141,7 +142,7 @@ class Syncer:
                 if old_filelist:
                     data = old_filelist.get_item(child_rel)
                     if data and data['type'] == 'file' and data['size'] == child_stat.st_size and data['mtime'] == child_stat.st_mtime:
-                        print(f'{child_rel}: No changes')
+                        utils.print_limited(f'{child_rel}: No changes')
                         new_filelist.add_file(child_rel, child_stat.st_size, child_stat.st_mtime, child_perms, data['hash'], data['crypthash'])
                         continue
 
@@ -155,7 +156,7 @@ class Syncer:
                         child_file.seek(0)
                         child_file_encrypted = crypto.aes_cbc_encrypt(child_file, child_hash, child_hash[:16])
                 except FileNotFoundError:
-                    print(f'{child_rel}: NOT FOUND!')
+                    utils.print_limited(f'{child_rel}: NOT FOUND!')
                     continue
 
                 # Get encrypted hash
@@ -163,10 +164,10 @@ class Syncer:
 
                 # Write encrypted file to storage, unless it already exists there
                 if child_crypthash_hex in self.existing_entries:
-                    print(f'{child_rel}: No upload needed')
+                    utils.print_limited(f'{child_rel}: No upload needed')
                 elif self.storage.entry_exists(child_crypthash_hex):
                     self.existing_entries.add(child_crypthash_hex)
-                    print(f'{child_rel}: No upload needed')
+                    utils.print_limited(f'{child_rel}: No upload needed')
                 else:
                     self.storage.upload_entry(child_crypthash_hex, child_file_encrypted, f'{child_rel}: Uploading: ')
 
@@ -180,7 +181,7 @@ class Syncer:
 
             # Directory
             if os.path.isdir(child_abs):
-                print(child_rel)
+                utils.print_limited(child_rel)
                 new_filelist.add_dir(child_rel, child_stat.st_mtime, child_perms)
                 self._scan_recursively(child_abs, child_rel, new_filelist, old_filelist, excludes)
                 continue
