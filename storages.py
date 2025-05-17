@@ -317,7 +317,7 @@ class BackBlazeStorage(Storage):
         # Then check from the cloud
         from b2sdk.exception import FileNotPresent
         try:
-            info = self.bucket.get_file_info_by_name(f'entries/{crypthash_hex}')
+            self.bucket.get_file_info_by_name(f'entries/{crypthash_hex}')
             self._add_to_entry_existence_cache_new(crypthash_hex)
             return True
         except FileNotPresent:
