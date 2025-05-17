@@ -393,6 +393,11 @@ class BackBlazeStorage(Storage):
             self.stream = stream
 
         def __call__(self):
+            # If BigBfufer uses file, then it needs to be opened
+            # again, so the concurrent reading doesn't cause troubles
+            if self.stream.file:
+                return open(self.stream.file.name, 'rb')
+            # The file is fully in memory, so a clone is enough
             return self.stream.cloned_new_instance()
 
 
