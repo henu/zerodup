@@ -14,7 +14,7 @@ def build_storage_engine(url):
     UNIX_USERNAME_RE_RAW = '([a-zA-Z0-9][a-zA-Z0-9._-]{0,30}[a-zA-Z0-9])'
     HOST_RE_RAW = '((?:[a-zA-Z0-9-]+\\.)+[a-zA-Z0-9-]+|^(?:\\d{1,3}\\.){3}\\d{1,3})'
 
-    STORAGE_B2_URL_RE = re.compile('^[bB]2://(?P<app_key_id>[0-9a-zA-Z\\-/]+):(?P<app_key>[0-9a-zA-Z\\-/]+):(?P<bucket>[0-9a-zA-Z\\-]+):(?P<identifier>[0-9a-zA-Z\\-]+)$')
+    STORAGE_B2_URL_RE = re.compile('^[bB]2://(?P<app_key_id>[0-9a-zA-Z\\-/]+):(?P<app_key>[0-9a-zA-Z\\-/]+):(?P<bucket>[0-9a-zA-Z\\-]+):(?P<identifier>[0-9a-zA-Z\\-\\.]+)$')
     STORAGE_LOCAL_URL_RE = re.compile('^[fF][iI][lL][eE]://?(?P<path>/.*)$')
     STORAGE_SFTP_URL_RE = re.compile(f'^[sS][fF][tT][pP]://((?P<username>{UNIX_USERNAME_RE_RAW})@)?(?P<host>{HOST_RE_RAW})(?P<path>/.*)$')
 
