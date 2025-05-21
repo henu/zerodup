@@ -353,7 +353,9 @@ class BackBlazeStorage(Storage):
         return stream
 
     def close(self):
-        pass
+        # If there are some new keys left in the entry existence cache, store them to cloud
+        if len(self.entry_existence_cache_new) > 50:
+            self._store_entry_existence_cache()
 
     def _entry_exists_in_cache(self, crypthash_hex):
 
@@ -385,18 +387,21 @@ class BackBlazeStorage(Storage):
         self.entry_existence_cache_new.add(crypthash_hex)
         # If cache has grown too big, then upload it to cloud
         if len(self.entry_existence_cache_new) >= 1000:
-            # Upload to cloud
-            buf = bigbuffer.BigBuffer()
-            for crypthash_hex in sorted(self.entry_existence_cache_new):
-                buf.write((crypthash_hex + '\n').encode('ascii'))
-            buf_size = _get_stream_size(buf)
-            b2_stream = UploadSourceStream(lambda: buf, buf_size)
-            buf.seek(0)
-            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            self.bucket.upload(b2_stream, f'entry_existence_cache/{now}')
-            # Add to old cache, and clear the new one
-            self.entry_existence_cache |= self.entry_existence_cache_new
-            self.entry_existence_cache_new = set()
+            self._store_entry_existence_cache()
+
+    def _store_entry_existence_cache(self):
+        buf = bigbuffer.BigBuffer()
+        for crypthash_hex in sorted(self.entry_existence_cache_new):
+            buf.write((crypthash_hex + '\n').encode('ascii'))
+        buf_size = _get_stream_size(buf)
+        b2_stream = UploadSourceStream(lambda: buf, buf_size)
+        buf.seek(0)
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        self.bucket.upload(b2_stream, f'entry_existence_cache/{now}')
+
+        # Add to old cache, and clear the new one
+        self.entry_existence_cache |= self.entry_existence_cache_new
+        self.entry_existence_cache_new = set()
 
     class BigBufferOpener:
 
