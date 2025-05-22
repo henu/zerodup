@@ -1,5 +1,5 @@
-import crypto
-import exceptions
+from . import crypto
+from . import exceptions
 
 import argparse
 import getpass

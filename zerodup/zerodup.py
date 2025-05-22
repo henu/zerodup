@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-import arguments
-import bigbuffer
-import exceptions
-import syncer
+from . import arguments
+from . import bigbuffer
+from . import exceptions
+from . import syncer
 
 import sys
 
 
-if __name__ == '__main__':
+def main():
 
     try:
 
@@ -35,3 +35,7 @@ if __name__ == '__main__':
     except exceptions.FatalError as err:
         print(f'ERROR: {err}')
         sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

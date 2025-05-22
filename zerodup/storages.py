@@ -1,7 +1,7 @@
-import bigbuffer
-import constants
-import exceptions
-import utils
+from . import bigbuffer
+from . import constants
+from . import exceptions
+from . import utils
 
 import datetime
 import getpass
@@ -383,13 +383,13 @@ class BackBlazeStorage(Storage):
         return crypthash_hex in self.entry_existence_cache or crypthash_hex in self.entry_existence_cache_new
 
     def _add_to_entry_existence_cache_new(self, crypthash_hex):
-        from b2sdk.v2 import UploadSourceStream
         self.entry_existence_cache_new.add(crypthash_hex)
         # If cache has grown too big, then upload it to cloud
         if len(self.entry_existence_cache_new) >= 1000:
             self._store_entry_existence_cache()
 
     def _store_entry_existence_cache(self):
+        from b2sdk.v2 import UploadSourceStream
         buf = bigbuffer.BigBuffer()
         for crypthash_hex in sorted(self.entry_existence_cache_new):
             buf.write((crypthash_hex + '\n').encode('ascii'))

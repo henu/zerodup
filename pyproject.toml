@@ -1,0 +1,15 @@
+[build-system]
+requires = ["flit"]
+build-backend = "flit.buildapi"
+
+[project]
+name = "zerodup"
+version = "1.0.0"
+description = "An encrypted backup tool that uses content-based deduplication with snapshots, rather than traditional full or incremental backups."
+authors = [{name = "Henrik Heino", email = "henrik.heino@gmail.com"}]
+dependencies = [
+    "cryptography>=1.9",
+]
+
+[project.scripts]
+zerodup = "zerodup.zerodup:main"

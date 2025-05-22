@@ -1,9 +1,9 @@
-import constants
-import crypto
-import exceptions
-import filelist
-import storages
-import utils
+from . import constants
+from . import crypto
+from . import exceptions
+from . import filelist
+from . import storages
+from . import utils
 
 import os
 import stat
