@@ -14,7 +14,7 @@ class Arguments:
 
         # Define arguments
         parser = argparse.ArgumentParser(
-            prog='HSync',
+            prog='ZeroDup',
             description='Backup app, focused on deduplicating data.',
         )
 
