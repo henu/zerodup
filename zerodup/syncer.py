@@ -158,6 +158,10 @@ class Syncer:
                 except FileNotFoundError:
                     utils.print_limited(f'{child_rel}: NOT FOUND!')
                     continue
+                except OSError:
+                    # Some weird file. Let's just skip it
+                    utils.print_limited(f'{child_rel}: SKIP')
+                    continue
 
                 # Get encrypted hash
                 child_crypthash_hex = crypto.sha256_hash(child_file_encrypted).hex().lower()
