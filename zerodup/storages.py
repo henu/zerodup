@@ -354,7 +354,7 @@ class BackBlazeStorage(Storage):
 
     def close(self):
         # If there are some new keys left in the entry existence cache, store them to cloud
-        if len(self.entry_existence_cache_new) > 50:
+        if self.entry_existence_cache_new and len(self.entry_existence_cache_new) > 50:
             self._store_entry_existence_cache()
 
     def _entry_exists_in_cache(self, crypthash_hex):
