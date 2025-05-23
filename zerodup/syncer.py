@@ -72,7 +72,7 @@ class Syncer:
                 # Decrypt file
                 item_encrypted_stream = self.storage.download_entry(item['crypthash'])
                 item_hash = bytes.fromhex(item['hash'])
-                item_stream = crypto.aes_cbc_decrypt(item_encrypted_stream, item_hash, item_hash[:16])
+                item_stream = crypto.aes_ctr_decrypt(item_encrypted_stream, item_hash, b'\0' * 16)
                 item_encrypted_stream.close()
                 with open(item_path_abs, 'wb') as item_file:
                     while chunk := item_stream.read(constants.STREAM_CHUNK_SIZE):
@@ -154,7 +154,7 @@ class Syncer:
 
                         # Encrypt data
                         child_file.seek(0)
-                        child_file_encrypted = crypto.aes_cbc_encrypt(child_file, child_hash, child_hash[:16])
+                        child_file_encrypted = crypto.aes_ctr_encrypt(child_file, child_hash, b'\0' * 16)
                 except FileNotFoundError:
                     utils.print_limited(f'{child_rel}: NOT FOUND!')
                     continue

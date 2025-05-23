@@ -18,7 +18,7 @@ class FileList:
             if encryption_key:
                 iv = contents_stream.read(16)
                 try:
-                    decrypted_stream = crypto.aes_cbc_decrypt(contents_stream, encryption_key, iv)
+                    decrypted_stream = crypto.aes_ctr_decrypt(contents_stream, encryption_key, iv)
                     contents = decrypted_stream.read()
                     decrypted_stream.close()
                 except exceptions.CorruptedData:
@@ -99,7 +99,7 @@ class FileList:
 
         if encryption_key:
             iv = os.urandom(16)
-            encrypted = crypto.aes_cbc_encrypt(io.BytesIO(result_bytes), encryption_key, iv)
+            encrypted = crypto.aes_ctr_encrypt(io.BytesIO(result_bytes), encryption_key, iv)
             result_stream = bigbuffer.BigBuffer()
             result_stream.write(iv)
             while chunk := encrypted.read(constants.STREAM_CHUNK_SIZE):

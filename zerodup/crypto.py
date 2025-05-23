@@ -5,7 +5,6 @@ from . import exceptions
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import algorithms, Cipher, modes
 import hashlib
-import os
 
 
 def sha256_hash(stream):
@@ -15,22 +14,19 @@ def sha256_hash(stream):
     return hasher.digest()
 
 
-def aes_cbc_encrypt(cleartext_stream, key, iv):
-    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+def aes_ctr_encrypt(cleartext_stream, key, iv):
+    cipher = Cipher(algorithms.AES(key), modes.CTR(iv), backend=default_backend())
     encryptor = cipher.encryptor()
-    cleartext_stream.seek(0, os.SEEK_END)
-    padding = 16 - cleartext_stream.tell() % 16
     cleartext_stream.seek(0)
     ciphertext_stream = bigbuffer.BigBuffer()
     while chunk := cleartext_stream.read(constants.STREAM_CHUNK_SIZE):
         ciphertext_stream.write(encryptor.update(chunk))
-    ciphertext_stream.write(encryptor.update(bytes([padding] * padding)))
     ciphertext_stream.write(encryptor.finalize())
     return ciphertext_stream
 
 
-def aes_cbc_decrypt(ciphertext_stream, key, iv):
-    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+def aes_ctr_decrypt(ciphertext_stream, key, iv):
+    cipher = Cipher(algorithms.AES(key), modes.CTR(iv), backend=default_backend())
     decryptor = cipher.decryptor()
     cleartext_stream = bigbuffer.BigBuffer()
     try:
@@ -40,10 +36,4 @@ def aes_cbc_decrypt(ciphertext_stream, key, iv):
     except ValueError as err:
         cleartext_stream.close()
         raise exceptions.CorruptedData() from err
-    # Remove padding
-    cleartext_stream.seek(-1, os.SEEK_END)
-    content_size = cleartext_stream.tell() + 1
-    padding = cleartext_stream.read(1)[0]
-    cleartext_stream.seek(0)
-    cleartext_stream.truncate(content_size - padding)
     return cleartext_stream
