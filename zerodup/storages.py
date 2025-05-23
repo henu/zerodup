@@ -385,7 +385,7 @@ class BackBlazeStorage(Storage):
     def _add_to_entry_existence_cache_new(self, crypthash_hex):
         self.entry_existence_cache_new.add(crypthash_hex)
         # If cache has grown too big, then upload it to cloud
-        if len(self.entry_existence_cache_new) >= 1000:
+        if len(self.entry_existence_cache_new) >= 10000:
             self._store_entry_existence_cache()
 
     def _store_entry_existence_cache(self):
