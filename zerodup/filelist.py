@@ -91,12 +91,15 @@ class FileList:
         }
 
     def to_stream(self, encryption_key):
-        result_bytes = b''
+        # Use bytearray, because concatenating bytes is extremely slow
+        result_bytes = bytearray()
         for path, data in sorted(self.items.items()):
             data = data.copy()
             data['path'] = path
-            result_bytes += json.dumps(data).encode('ascii') + b'\n'
+            result_bytes.extend(json.dumps(data).encode('ascii') + b'\n')
+        result_bytes = bytes(result_bytes)
 
+        # If encryption is requested
         if encryption_key:
             iv = os.urandom(16)
             encrypted = crypto.aes_ctr_encrypt(io.BytesIO(result_bytes), encryption_key, iv)
