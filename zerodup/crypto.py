@@ -22,6 +22,7 @@ def aes_ctr_encrypt(cleartext_stream, key, iv):
     while chunk := cleartext_stream.read(constants.STREAM_CHUNK_SIZE):
         ciphertext_stream.write(encryptor.update(chunk))
     ciphertext_stream.write(encryptor.finalize())
+    ciphertext_stream.seek(0)
     return ciphertext_stream
 
 
@@ -36,4 +37,5 @@ def aes_ctr_decrypt(ciphertext_stream, key, iv):
     except ValueError as err:
         cleartext_stream.close()
         raise exceptions.CorruptedData() from err
+    cleartext_stream.seek(0)
     return cleartext_stream

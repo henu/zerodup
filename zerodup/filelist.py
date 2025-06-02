@@ -108,6 +108,7 @@ class FileList:
             while chunk := encrypted.read(constants.STREAM_CHUNK_SIZE):
                 result_stream.write(chunk)
             encrypted.close()
+            result_stream.seek(0)
             return result_stream
 
         return io.BytesIO(result_bytes)

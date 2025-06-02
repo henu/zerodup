@@ -172,6 +172,7 @@ class LocalStorage(DirectoryBasedStorage):
         with open(self._fix_path(path), 'rb') as file:
             while chunk := file.read(constants.STREAM_CHUNK_SIZE):
                 result.write(chunk)
+        result.seek(0)
         return result
 
     def write(self, path, stream, progress_prefix=None):
@@ -234,6 +235,7 @@ class SftpStorage(DirectoryBasedStorage):
         with self.sftp_client.open(self._fix_path(path), 'rb') as file:
             while chunk := file.read(constants.STREAM_CHUNK_SIZE):
                 result.write(chunk)
+        result.seek(0)
         return result
 
     def write(self, path, stream, progress_prefix=None):
